@@ -1,0 +1,31 @@
+#!/bin/bash
+
+DISPLAY=$1
+VNCPASSWD=$2
+
+expect_vncpasswd()
+{
+	expect -c "
+	spawn vncpasswd
+	set timeout 10
+
+	expect {
+		\"Password:\" {send \"${VNCPASSWD}\r\"; exp_continue;}
+		\"Verify:\" {send \"${VNCPASSWD}\r\";}
+	}
+
+	expect eof
+	"
+}
+
+/sbin/ifconfig -a
+
+/bin/rm -rf /tmp/.X1-lock
+/bin/rm -rf /tmp/.X11-unix
+/bin/rm -rf ~/.Xauthority
+/bin/rm -rf ~/.vnc/*.log
+/bin/rm -rf ~/.vnc/*.pid
+
+[ ! -f ~/.vnc/passwd ] && expect_vncpasswd
+/usr/bin/vncserver :1 -geometry ${DISPLAY}
+/usr/bin/supervisord -c /etc/supervisord.conf

@@ -1,0 +1,191 @@
+#!/bin/bash
+
+expect_vncpasswd()
+{
+	expect -c "
+	spawn vncpasswd
+	set timeout 10
+
+	expect {
+		\"Password:\" {send \"${VNCPASSWD}\r\"; exp_continue;}
+		\"Verify:\" {send \"${VNCPASSWD}\r\";}
+	}
+
+	expect eof
+	"
+}
+
+expect_sshyes()
+{
+	expect -c "
+	spawn ssh root@${DKIPADDR}
+	set timeout 5
+
+	expect {
+		\"*want to continue connecting*\" {send \"yes\r\"; exp_continue;}
+		\"*password:\" {send \"${VNCPASSWD}\r\"; exp_continue;}
+		\"*root@dk-docker-vnc*\" {send \"exit\r\";}
+	}
+
+	expect eof
+	"
+}
+
+cmds_check()
+{
+	for cmd in ${!cmds_rpm[*]}; do
+		if ! which ${cmd} > /dev/null 2>&1; then
+			PKGSRPM="${cmds_rpm[$cmd]} ${PKGSRPM}"
+		fi
+	done
+
+	if [ X"${PKGSRPM}" != X ]; then
+		echo "Please install the packages: yum install ${PKGSRPM}" 
+		exit 1
+	fi
+
+	if ! ps -ef | grep -v grep | grep -w docker > /dev/null 2>&1; then
+		echo "Please start docker service."
+		exit 1
+	fi
+
+	[ ! -f ~/.vnc/passwd ] && expect_vncpasswd
+}
+
+con_check()
+{
+	flag=0
+
+	if docker ps -a | grep -w dk-docker-vnc > /dev/null 2>&1; then
+		if docker ps | grep -w dk-docker-vnc > /dev/null 2>&1; then
+			echo "Stopping container dk-docker-vnc..."
+			docker stop dk-docker-vnc > /dev/null
+			sleep 1
+		fi
+
+		if [ ${VNCDIS} == "1440x900" ]; then
+			echo "Starting container dk-docker-vnc..."
+			docker start dk-docker-vnc > /dev/null
+		else
+			echo "Deleting container dk-docker-vnc..."
+			docker rm dk-docker-vnc > /dev/null
+			flag=1
+		fi
+	else
+		flag=1
+	fi
+
+	if [ ${flag} == 1 ]; then	
+		echo "Pulling the images..."
+		sleep 1
+		docker run -d --name dk-docker-vnc --hostname dk-docker-vnc \
+		    alanwooo/centos6-gnome-vnc:last /usr/bin/startup ${VNCDIS} ${VNCPASSWD}
+		if [ $? != 0 ]; then
+			echo "Starting container dk-docker-vnc failed!"
+			exit 1
+		fi
+	fi
+
+	# sleeping for the container to got IPAddress
+	sleep 2
+	DKIPADDR=`docker inspect --format='{{.NetworkSettings.IPAddress}}' dk-docker-vnc \
+	    | grep -o '\([0-9]\{1,3\}\.\)\{3\}[0-9]\{1,3\}' | head -1`
+	if [ X${DKIPADDR} == X ]; then
+		# sleeping more time for re-try, if failed again, exit 4!
+		sleep 5
+		DKIPADDR=`docker inspect --format='{{.NetworkSettings.IPAddress}}' \
+		    dk-docker-vnc | grep -o '\([0-9]\{1,3\}\.\)\{3\}[0-9]\{1,3\}' | head -1`
+	fi
+
+	if [ X"${DKIPADDR}" == X ]; then
+		echo "ERROR: Cannot got dk-docker-vnc IPAddress!"
+		echo "Try the command to check: docker inspect dk-docker-vnc"
+		exit 4
+	fi
+}
+
+con_connect()
+{
+	echo "Connecting container dk-docker-vnc..."
+	if ! nmap ${DKIPADDR} -p 5901 | grep -w open > /dev/null 2>&1; then
+		echo "Connect ${DKIPADDR} port 5901 failed !"
+		exit 5
+	fi
+
+	if [ ${X11ENABLE} == 1 ]; then
+		# sleeping for the sshd start 
+		sleep 5
+		if ! nmap ${DKIPADDR} -p 22 | grep -w open > /dev/null 2>&1; then
+			echo "Connect ${DKIPADDR} port 22 failed !"
+			exit 5
+		fi
+		expect_sshyes > /dev/null
+		sshpass -p ${VNCPASSWD} ssh root@${DKIPADDR} "pkill -9 firefox" > \
+		    /dev/null 2>&1
+		sleep 1
+		sshpass -p ${VNCPASSWD} ssh -X root@${DKIPADDR} "firefox" > \
+		    /dev/null 2>&1
+	else
+		$(vncviewer passwd=~/.vnc/passwd ${DKIPADDR}:5901 > /dev/null 2>&1; sleep 1;\
+		    docker stop dk-docker-vnc > /dev/null) &
+	fi
+}
+
+usage()
+{
+cat << EOF
+Usage $0 [OPTIONS]
+Options:
+	-x       Enable SSH X11 forwarding 
+	-d       VNCviewer window size(For example: -d 1440x900)
+	-h       Print help 
+
+EOF
+	exit 0
+}
+
+# # # # # # # # # # # # # # # # # # # main # # # # # # # # # # # # # # # # # # #
+
+DKIPADDR=
+PKGSRPM=
+X11ENABLE=0
+VNCDIS="1440x900"
+VNCPASSWD="abcd1234"
+declare -A cmds_rpm
+# packages
+cmds_rpm=([docker]='docker-io' [vncviewer]='tigervnc' [vncpasswd]='tigervnc-server-minimal' \
+     [nmap]='nmap' [expect]='expect' [sshpass]='sshpass')
+
+# capture the Ctrl+c signal to stop dk-docker-vnc container, since the ssh connection 
+# does not exit when we close the firefox which accessed by 'ssh -X'.
+trap 'echo " ";echo "Stopping container dk-docker-vnc..."; docker stop dk-docker-vnc \
+    > /dev/null; echo "Done!"' 2
+
+if [ `whoami` != 'root' ]; then
+	echo "Please run by root!"
+	exit 1
+fi
+
+while getopts "xhd:" arg; do
+	case $arg in
+	  x)
+		X11ENABLE=1
+		;;
+	  h)
+		usage
+		;;
+	  d)
+		VNCDIS=${OPTARG}	
+		if echo ${VNCDIS} | grep -v -w -E "[1-9][0-9]*x[1-9][0-9]*" > /dev/null 2>&1; then
+			usage
+		fi
+		;;
+	  ?)
+		usage
+		;;
+	esac
+done
+
+cmds_check
+con_check
+con_connect
