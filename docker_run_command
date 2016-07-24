@@ -1,0 +1,14 @@
+# build 
+docker build -t alan/centos_gnome:v1 .| tee docker_build_log
+
+# run
+docker run -d --name day01_vdi01 --hostname day01_vdi01  alan/centos_gnome:v1 /usr/bin/startup 1440x900
+
+# stop
+docker stop day01_vdi01
+
+# logs
+docker logs 074156887d94a2c85cb7f26ab06b28b6cdc1b71c7701a91a42933e8d518bd795
+
+# docker client
+python2.6 docker_rest_api.py 
